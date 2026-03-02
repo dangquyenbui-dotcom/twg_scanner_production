@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#1a202c">
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+    <title>Picking - {{ so }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/picking.css') }}">
+</head>
+<body>
+    
+    <div id="statusBar" class="status-bar status-online">
+        <span id="statusText">📶 ONLINE</span>
+        <span id="pendingCount" style="display:none; background:#4a5568; padding:0 4px; border-radius:2px;">0</span>
+        <button onclick="toggleDebug()" style="background:none; border:none; color:white; font-size:12px;">🐞</button>
+    </div>
+
+    {% if not so %}
+    <div class="tc52-layout" style="justify-content: flex-start; align-items: center; background: #f4f6f9; padding-top: 30px;">
+        <div style="width: 100%; max-width: 320px; padding: 20px; text-align: center;">
+            <img src="{{ url_for('static', filename='logo/twg.png') }}" alt="TWG" style="height: 44px; margin-bottom: 14px;">
+            <h2 style="color: #1a202c; margin: 0 0 6px 0; font-size: 18px; font-weight: 800; letter-spacing: 0.5px;">SALES ORDER PICK</h2>
+            <p style="color: #718096; font-size: 12px; margin: 0 0 20px 0;">Scan or enter a Sales Order number</p>
+            
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div style="padding: 10px 12px; margin-bottom: 14px; border-radius: 8px; font-size: 13px; font-weight: 600; text-align: left;
+                            {% if category == 'error' %}background: #fff5f5; color: #c53030; border: 1px solid #feb2b2;
+                            {% elif category == 'success' %}background: #f0fff4; color: #276749; border: 1px solid #c6f6d5;
+                            {% else %}background: #ebf8ff; color: #2b6cb0; border: 1px solid #bee3f8;{% endif %}">
+                            {{ message }}
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+
+            <form id="soForm" method="GET" action="/picking" novalidate>
+                <div class="input-wrapper" style="margin-bottom: 20px;">
+                    <input type="text" 
+                           name="so" 
+                           id="soInput" 
+                           class="scan-input" 
+                           style="height: 56px; font-size: 24px; text-align: center; border: 2px solid #2d3748; border-radius: 8px;" 
+                           placeholder="Scan/Type SO" 
+                           autocomplete="off" 
+                           autofocus
+                           inputmode="numeric">
+                </div>
+            </form>
+            
+            <a href="/dashboard" class="btn-footer btn-exit" 
+               style="text-decoration:none; display: inline-flex; width: auto; padding: 0 40px; border-radius: 8px; background: #718096;">
+               Cancel
+            </a>
+        </div>
+    </div>
+
+    {% else %}
+    <div class="tc52-layout" id="tc52Layout">
+        <div class="tc52-header" style="background: #1a202c; border-bottom: none;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <img src="{{ url_for('static', filename='logo/twg.png') }}" alt="TWG" style="height: 24px;">
+                    <span style="font-weight: 700; color: #a0aec0; font-size: 11px; letter-spacing: 0.5px;">SALES ORDER PICK</span>
+                </div>
+                <span style="font-size:11px; color:#a0aec0; font-weight: 600;">{{ session['user_id'] }} <span style="color:#718096;">({{ session['location'] }})</span></span>
+            </div>
+            
+            <div style="display: flex; align-items: center; margin-top: 5px; background: #2d3748; padding: 5px 8px; border-radius: 5px;">
+                <span style="font-weight:600; font-size: 11px; color: #a0aec0; margin-right: 6px; letter-spacing: 0.5px;">ORDER</span>
+                <strong style="font-size: 15px; color: #63b3ed; flex: 1; letter-spacing: 0.5px;">{{ so }}</strong>
+                <a href="/picking" style="font-size:10px; color:#fc8181; text-transform: uppercase; text-decoration: none; border: 1px solid #fc8181; padding: 2px 8px; border-radius: 4px; font-weight: 700; letter-spacing: 0.3px;">Change</a>
+            </div>
+        </div>
+
+        <div class="tc52-grid" id="tc52Grid">
+            <table class="pick-table" id="pickingTable">
+                <thead>
+                    <tr>
+                        <th width="12%">Ln</th>
+                        <th width="48%">Item</th>
+                        <th width="20%" class="text-center">Need</th>
+                        <th width="20%" class="text-center">Pick</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in items %}
+                    <tr onclick="selectRow(this, '{{ item.item }}', {{ item.remaining }}, {{ item.tranlineno }}, '{{ item.upc }}')" 
+                        class="item-row" id="row-{{ item.tranlineno }}">
+                        <td style="color:#718096;">{{ item.tranlineno }}</td>
+                        <td style="font-weight:bold; color:#2b6cb0;">{{ item.item }}</td>
+                        <td class="text-center">{{ item.remaining|int }}</td>
+                        <td class="text-center picked-cell" data-line="{{ item.tranlineno }}">0</td> 
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="4" style="text-align:center; padding:30px; color:#38a169; font-weight:bold;">✅ Order Complete</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Context bar: shows selected item info when keyboard covers the grid -->
+        <div class="keyboard-context-bar" id="keyboardContextBar">
+            <span id="contextItemInfo">No item selected</span>
+        </div>
+
+        <form class="tc52-controls" id="scanForm" onsubmit="return false;">
+            <div class="control-row disabled-control" style="justify-content: space-between;">
+                <button type="button" id="btnViewBins" class="btn-small-action" onclick="openBinModal()" style="background:#4a5568;" disabled>🔍 Bins</button>
+                <div style="display:flex;">
+                    <label class="mode-label"><input type="radio" name="pickMode" value="auto" checked onchange="updateMode()" disabled> Auto</label>
+                    <label class="mode-label"><input type="radio" name="pickMode" value="manual" onchange="updateMode()" disabled> Manual</label>
+                </div>
+            </div>
+
+            <div class="control-row disabled-control">
+                <span class="control-label">Scan Bin</span>
+                <div class="input-wrapper">
+                    <input type="text" name="bin" id="binInput" class="scan-input" placeholder="Select item..." autocomplete="off" disabled>
+                </div>
+            </div>
+
+            <div class="control-row disabled-control">
+                <span class="control-label">Scan Item</span>
+                <div class="input-wrapper">
+                    <input type="text" name="item" id="itemInput" class="scan-input" placeholder="Select item..." autocomplete="off" disabled>
+                </div>
+            </div>
+
+            <!-- UPC Translation Badge — shows when a UPC barcode is matched to an item -->
+            <div id="upcBadge" class="upc-badge upc-badge-hidden">
+                <span id="upcBadgeText" class="upc-badge-inner"></span>
+            </div>
+
+            <div class="control-row disabled-control">
+                <span class="control-label">Pick Qty</span>
+                <div class="input-wrapper">
+                    <button type="button" id="btnMinus" class="btn-keyboard d-none" onclick="adjustQty(-1)" style="width:34px;" disabled>➖</button>
+                    <input type="number" id="qtyInput" class="scan-input text-center" value="1" style="font-weight:bold;" readonly disabled>
+                    <button type="button" id="btnPlus" class="btn-keyboard d-none" onclick="adjustQty(1)" style="width:34px;" disabled>➕</button>
+                    <button type="button" id="addBtnContainer" class="btn-small-action d-none" onclick="addToSession()" style="background:#38a169; height:34px; margin-left:4px;" disabled>ADD</button>
+                </div>
+            </div>
+
+            <div class="btn-footer-group">
+                <a href="/dashboard" class="btn-footer btn-exit" style="text-decoration:none;">Exit</a>
+                <button type="button" class="btn-footer btn-view" onclick="openReviewModal()">View <span id="scanCount">(0)</span></button>
+                <button type="button" id="btnSubmit" class="btn-footer btn-submit" onclick="submitFinal()">Submit</button>
+            </div>
+        </form>
+    </div>
+    {% endif %}
+
+    <div id="toastContainer" style="position:fixed; top:40px; left:10%; width:80%; z-index:9999; text-align:center;"></div>
+
+    <div id="binModal" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span>Available Bins</span>
+                <span onclick="closeModal('binModal')" style="font-size:20px; cursor:pointer;">&times;</span>
+            </div>
+            <div class="modal-body" id="binList"></div>
+        </div>
+    </div>
+
+    <div id="reviewModal" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span>Scanned Items</span>
+                <span onclick="closeModal('reviewModal')" style="font-size:20px; cursor:pointer;">&times;</span>
+            </div>
+            <div class="modal-body">
+                <table class="pick-table">
+                    <thead style="background:#f7fafc;"><tr><th>Item</th><th>Bin</th><th>Qty</th><th>Mode</th><th></th></tr></thead>
+                    <tbody id="reviewList"></tbody>
+                </table>
+                <div id="emptyReview" class="text-center" style="padding:20px; color:#a0aec0;">No items scanned.</div>
+            </div>
+            <div class="modal-footer">
+                <button onclick="clearSession()" class="btn-small-action" style="background:#e53e3e;">Clear All</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="debugConsole"></div>
+
+    <script>
+        var SERVER_DATA = {
+            soNumber: "{{ so|default('', true) }}"
+        };
+    </script>
+    
+    <script src="{{ url_for('static', filename='js/utils.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/picking-ui.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/picking.js') }}"></script>
+
+    <!-- KEYBOARD-AWARE VIEWPORT HANDLER -->
+    <script>
+    (function() {
+        var layout = document.getElementById('tc52Layout');
+        if (!layout) return; // Only run on the picking screen with SO loaded
+
+        var contextBar = document.getElementById('keyboardContextBar');
+        var keyboardOpen = false;
+        var originalHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+
+        /**
+         * Updates the context bar text with the currently selected item info.
+         */
+        function updateContextBar() {
+            if (!contextBar) return;
+            if (typeof selectedItemCode !== 'undefined' && selectedItemCode) {
+                var binVal = document.getElementById('binInput') ? document.getElementById('binInput').value.trim() : '';
+                var info = '▶ Item: ' + selectedItemCode;
+                if (typeof currentOrderMaxQty !== 'undefined') info += '  |  Need: ' + currentOrderMaxQty;
+                if (binVal && typeof currentBin !== 'undefined' && currentBin) info += '  |  Bin: ' + currentBin;
+                contextBar.querySelector('#contextItemInfo').textContent = info;
+            } else {
+                contextBar.querySelector('#contextItemInfo').textContent = 'No item selected';
+            }
+        }
+
+        /**
+         * Handles viewport resize — detects virtual keyboard open/close
+         * and adjusts the fixed layout height so controls stay visible.
+         */
+        function handleViewportResize() {
+            var viewportHeight;
+            var offsetTop = 0;
+
+            if (window.visualViewport) {
+                viewportHeight = window.visualViewport.height;
+                offsetTop = window.visualViewport.offsetTop;
+            } else {
+                viewportHeight = window.innerHeight;
+            }
+
+            // Keyboard is considered "open" if viewport shrinks by more than 80px
+            var heightDiff = originalHeight - viewportHeight;
+            var isKeyboardNow = heightDiff > 80;
+
+            if (isKeyboardNow && !keyboardOpen) {
+                keyboardOpen = true;
+                layout.classList.add('keyboard-open');
+                updateContextBar();
+            } else if (!isKeyboardNow && keyboardOpen) {
+                keyboardOpen = false;
+                layout.classList.remove('keyboard-open');
+            }
+
+            if (isKeyboardNow) {
+                layout.style.height = viewportHeight + 'px';
+                layout.style.top = offsetTop + 'px';
+                layout.style.bottom = 'auto';
+            } else {
+                layout.style.height = '';
+                layout.style.top = '0';
+                layout.style.bottom = '0';
+            }
+        }
+
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', handleViewportResize);
+            window.visualViewport.addEventListener('scroll', handleViewportResize);
+        }
+
+        window.addEventListener('resize', function() {
+            if (!keyboardOpen) {
+                originalHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+            }
+            handleViewportResize();
+        });
+
+        document.querySelectorAll('#scanForm input.scan-input').forEach(function(el) {
+            el.addEventListener('focus', function() {
+                setTimeout(function() {
+                    updateContextBar();
+                    handleViewportResize();
+                }, 300);
+            });
+
+            el.addEventListener('blur', function() {
+                setTimeout(function() {
+                    handleViewportResize();
+                }, 300);
+            });
+        });
+
+        window.addEventListener('orientationchange', function() {
+            setTimeout(function() {
+                originalHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+                handleViewportResize();
+            }, 500);
+        });
+
+        ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach(function(evt) {
+            document.addEventListener(evt, function() {
+                setTimeout(function() {
+                    originalHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+                    handleViewportResize();
+                }, 300);
+            });
+        });
+
+        window.updateContextBar = updateContextBar;
+    })();
+    </script>
+</body>
+</html>

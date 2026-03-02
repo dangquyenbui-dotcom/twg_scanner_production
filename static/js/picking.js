@@ -1,0 +1,489 @@
+/* picking.js - Core Logic & Controller */
+
+// --- STATE ---
+const SO_NUMBER = (typeof SERVER_DATA !== 'undefined' && SERVER_DATA.soNumber) ? SERVER_DATA.soNumber : ""; 
+let sessionPicks = [];
+let binCache = {};
+let selectedItemCode = null, selectedLineNo = null, selectedUpc = null; 
+let currentBinMaxQty = 999999, currentOrderMaxQty = 999999, currentBin = ""; 
+let isAutoMode = true, isSubmitting = false;
+
+// --- INIT ---
+window.onload = function() {
+    log("App Core Loaded");
+    if(SO_NUMBER) { 
+        loadFromLocal(); 
+        updateSessionDisplay(sessionPicks); 
+        updateMode(); 
+    }
+    updateStatusUI(navigator.onLine);
+    
+    const soInput = document.getElementById('soInput');
+    if(soInput) setTimeout(() => soInput.focus(), 200);
+    
+    attachScannerListeners();
+    document.addEventListener('click', forceFullscreen, {once:true});
+};
+
+window.addEventListener('online', () => updateStatusUI(true));
+window.addEventListener('offline', () => updateStatusUI(false));
+
+// --- SCANNER LOGIC ---
+
+/**
+ * Determines if the user is actively typing via a virtual (on-screen) keyboard.
+ * Hardware barcode scanners inject text with inputMode='none' or very rapidly,
+ * while virtual keyboard users will have inputMode set to 'text', 'numeric', etc.
+ */
+function isVirtualKeyboardActive(el) {
+    return el.inputMode && el.inputMode !== 'none';
+}
+
+/**
+ * Strips leading and trailing alphabetic characters from a scanned string,
+ * BUT ONLY if BOTH ends have alpha wrapping AND the remaining core is purely numeric.
+ * This matches the specific DataWedge pattern where a symbology identifier
+ * character is added to both ends of a numeric UPC barcode (e.g. 'A729419150129A').
+ *
+ * Examples:
+ *   'A729419150129A' → '729419150129'  (alpha on BOTH ends, core all digits → strip)
+ *   'ABC12345'       → 'ABC12345'      (alpha only on left end → leave as-is)
+ *   '12345ABC'       → '12345ABC'      (alpha only on right end → leave as-is)
+ *   'WIDGET-X'       → 'WIDGET-X'      (not numeric core → leave as-is)
+ *   'X100'           → 'X100'          (alpha only on left end → leave as-is)
+ *   '729419150129'   → '729419150129'  (no wrapping chars → unchanged)
+ *
+ * This is ONLY used for item/UPC scan comparison in handleItemScan().
+ * It does NOT affect bin scanning, SO input, or any server-side data.
+ */
+function stripWrappingAlpha(str) {
+    if (!str) return str;
+    // Only match if string starts with letter(s), ends with letter(s), and has digits in between
+    var match = str.match(/^[A-Za-z]+(\d+)[A-Za-z]+$/);
+    if (match) {
+        return match[1];
+    }
+    return str;
+}
+
+function attachScannerListeners() {
+    document.querySelectorAll('input.scan-input').forEach(el => {
+        let debounceTimer;
+        el.addEventListener('keydown', (e) => { 
+            if (e.key === 'Enter' || e.keyCode === 13) { 
+                e.preventDefault(); 
+                clearTimeout(debounceTimer); 
+                handleAction(el); 
+            } 
+        });
+        el.addEventListener('input', () => { 
+            clearTimeout(debounceTimer); 
+            
+            const rawVal = el.value;
+            const cleanVal = rawVal.trim();
+
+            if (el.id === 'soInput') {
+                if (cleanVal.length === 7) {
+                    log("7-digit Sales Order detected. Processing...");
+                    handleAction(el);
+                }
+                return; 
+            }
+
+            // --- FIX: Only auto-trigger if virtual keyboard is NOT active ---
+            if (isVirtualKeyboardActive(el)) {
+                log(`Virtual keyboard active on ${el.id} — waiting for Enter key.`);
+                return;
+            }
+
+            debounceTimer = setTimeout(() => { 
+                if (cleanVal.length > 5) { 
+                    log(`Auto Scan Detected: ${el.id}`); 
+                    handleAction(el); 
+                } 
+            }, 300); 
+        });
+    });
+}
+
+function handleAction(el) {
+    const val = el.value.trim();
+    if (val === "") return;
+    unlockAudio();
+
+    if (el.id === 'soInput') {
+        if (val.length === 7) {
+            el.value = val;
+            document.getElementById('soForm').submit();
+        } else {
+            log("Submit blocked: SO must be 7 digits (scanned or typed).");
+        }
+    }
+    else if (el.id === 'binInput') validateBin();
+    else if (el.id === 'itemInput') handleItemScan();
+    else if (el.id === 'qtyInput') addToSession(); 
+}
+
+// --- CORE LOGIC ---
+
+function selectRow(row, itemCode, remainingQty, lineNo, upc) {
+    unlockAudio();
+    document.querySelectorAll('.item-row').forEach(r => r.classList.remove('active-row'));
+    row.classList.add('active-row');
+    
+    selectedItemCode = itemCode ? itemCode.toString().trim() : ""; 
+    selectedLineNo = lineNo; 
+    
+    if (!upc || upc === 'None' || upc === 'null') {
+        selectedUpc = "";
+    } else {
+        selectedUpc = upc.toString().trim();
+    }
+    
+    currentOrderMaxQty = remainingQty;
+    
+    // --- ENABLE CONTROLS ON SELECTION ---
+    document.querySelectorAll('.disabled-control').forEach(el => el.classList.remove('disabled-control'));
+    document.getElementById('scanForm').querySelectorAll('input, button').forEach(el => el.disabled = false);
+    
+    // Reset placeholders
+    document.getElementById('binInput').placeholder = "Scan Bin...";
+    document.getElementById('itemInput').placeholder = "Scan Item...";
+    
+    document.getElementById('binInput').value = ''; 
+    document.getElementById('itemInput').value = '';
+    
+    // Hide UPC badge on new row selection
+    hideUpcBadge();
+    
+    updateSessionDisplay(sessionPicks);
+    currentBinMaxQty = 999999; 
+    setTimeout(() => safeFocus('binInput'), 100);
+    prefetchBins(selectedItemCode);
+
+    // Update the keyboard context bar with selected item info
+    if (typeof window.updateContextBar === 'function') {
+        window.updateContextBar();
+    }
+}
+
+function validateBin() {
+    const binVal = document.getElementById('binInput').value.trim();
+    if(!binVal || !selectedItemCode) return;
+    
+    if (binCache[selectedItemCode]) {
+        const f = binCache[selectedItemCode].find(b => b.bin === binVal);
+        if (f) { verifySuccess(f.qty, binVal); return; }
+    }
+    
+    if (!navigator.onLine) { showToast("Offline: Cannot verify.", 'warning'); return; }
+    
+    fetch('/validate_bin', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ bin: binVal, item: selectedItemCode })
+    }).then(r=>r.json()).then(d => {
+        if(d.status === 'success') { verifySuccess(d.onhand, binVal); } 
+        else { showToast(d.msg, 'error'); document.getElementById('binInput').value=''; safeFocus('binInput'); }
+    }).catch(()=> showToast("Network Error", 'error'));
+}
+
+function verifySuccess(qty, bin) {
+    currentBinMaxQty = qty; currentBin = bin;
+    showToast(`Verified. Max: ${qty}`, 'success'); 
+    safeFocus('itemInput');
+
+    // Update context bar with bin info
+    if (typeof window.updateContextBar === 'function') {
+        window.updateContextBar();
+    }
+}
+
+function addToSession() {
+    if(!selectedItemCode) { showToast("Select item!", 'warning'); return; }
+    if(document.getElementById('binInput').value.trim() !== currentBin) { showToast("Scan Bin first", 'warning'); return; }
+    
+    let qty = isAutoMode ? 1 : (parseFloat(document.getElementById('qtyInput').value)||0);
+    if(qty <= 0) return;
+
+    // --- Client-side guards use MERGED totals (lineNo+bin+item, ignoring mode) ---
+    const currentLineTotal = sessionPicks.filter(p => p.lineNo === selectedLineNo).reduce((s,p) => s + p.qty, 0);
+    const currentBinTotal = sessionPicks.filter(p => p.item === selectedItemCode && p.bin === currentBin).reduce((s,p) => s + p.qty, 0);
+    
+    if(currentBinTotal + qty > currentBinMaxQty) { showToast(`Bin Limit: ${currentBinMaxQty}`, 'error'); return; }
+    if(currentLineTotal + qty > currentOrderMaxQty) { showToast(`Order Limit: ${currentOrderMaxQty}`, 'error'); return; }
+
+    playBeep('success');
+
+    // Determine current pick mode label
+    var pickModeLabel = isAutoMode ? 'Auto' : 'Manual';
+
+    // Deduplication includes mode — so Auto and Manual show as SEPARATE rows in View Scanned
+    const existingIndex = sessionPicks.findIndex(p => p.lineNo === selectedLineNo && p.bin === currentBin && p.item === selectedItemCode && p.mode === pickModeLabel);
+    
+    if (existingIndex > -1) {
+        sessionPicks[existingIndex].qty += qty;
+    } else {
+        sessionPicks.push({ id:Date.now(), lineNo:selectedLineNo, item:selectedItemCode, bin:currentBin, qty:qty, mode:pickModeLabel });
+    }
+
+    updateSessionDisplay(sessionPicks);
+    
+    const q = document.getElementById('qtyInput');
+    q.classList.remove('flash-active'); void q.offsetWidth; q.classList.add('flash-active');
+    
+    setTimeout(saveToLocal, 0);
+    showToast(`Added ${qty} x ${selectedItemCode}`, 'success', false);
+    
+    resetInputAfterAdd(qty > 0);
+}
+
+function resetInputAfterAdd(success) {
+    if(isAutoMode) {
+        document.getElementById('itemInput').value = '';
+        // NOTE: Do NOT hide UPC badge here — let it stay visible so the picker
+        // can see the translation confirmation. It will hide on the next scan
+        // cycle (new input into itemInput, row change, or mismatch).
+        setTimeout(() => safeFocus('itemInput'), 50);
+    } else if(success) {
+        document.getElementById('qtyInput').value = 1;
+    }
+}
+
+function handleItemScan() {
+    const rawScan = document.getElementById('itemInput').value.trim();
+    if(!selectedItemCode || !rawScan) return;
+    
+    // Strip leading/trailing alpha characters that some scanners add (e.g. 'A729419150129A' → '729419150129')
+    // This only affects the comparison — selectedItemCode (used for submission) is untouched.
+    const scan = stripWrappingAlpha(rawScan);
+
+    const scanNorm = scan.toLowerCase();
+    const itemNorm = (selectedItemCode || "").trim().toLowerCase();
+    const upcNorm = selectedUpc ? selectedUpc.toLowerCase() : "";
+
+    const isDirectMatch = (scanNorm === itemNorm);
+    const isUpcMatch = (upcNorm && scanNorm === upcNorm);
+    const match = isDirectMatch || isUpcMatch;
+    
+    if(!match) {
+        showToast("Wrong Item/UPC!", 'error'); 
+        document.getElementById('itemInput').value=''; 
+        hideUpcBadge();
+        if(isAutoMode) setTimeout(() => safeFocus('itemInput'), 50);
+        return;
+    }
+    
+    // Show UPC translation badge if matched via UPC (not direct item code)
+    if (isUpcMatch && !isDirectMatch) {
+        showUpcBadge(scan, selectedItemCode);
+    } else {
+        hideUpcBadge();
+    }
+    
+    if (isAutoMode) addToSession();
+    else document.getElementById('qtyInput').focus();
+}
+
+// --- UPC TRANSLATION BADGE ---
+
+function showUpcBadge(upcValue, itemCode) {
+    var badge = document.getElementById('upcBadge');
+    if (!badge) return;
+    
+    var upcText = document.getElementById('upcBadgeText');
+    if (upcText) {
+        upcText.innerHTML = '<span class="upc-badge-label">UPC</span> ' + 
+            escapeHtml(upcValue) + 
+            ' <span class="upc-badge-arrow">\u2192</span> ' + 
+            '<strong>' + escapeHtml(itemCode) + '</strong>' +
+            ' <span class="upc-badge-check">\u2713</span>';
+    }
+    
+    // Force reflow so transition plays even if already visible
+    badge.classList.remove('upc-badge-visible');
+    badge.classList.add('upc-badge-hidden');
+    void badge.offsetWidth;
+    badge.classList.remove('upc-badge-hidden');
+    badge.classList.add('upc-badge-visible');
+}
+
+function hideUpcBadge() {
+    var badge = document.getElementById('upcBadge');
+    if (!badge) return;
+    badge.classList.remove('upc-badge-visible');
+    badge.classList.add('upc-badge-hidden');
+}
+
+function escapeHtml(str) {
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+}
+
+// --- END UPC BADGE ---
+
+/**
+ * Merges sessionPicks by lineNo + bin + item (summing qty, dropping mode).
+ * This produces the EXACT same payload shape as the original code before mode was added.
+ * The server receives one record per lineNo+bin+item — identical commit behavior.
+ */
+function mergePicksForCommit(picks) {
+    var merged = {};
+    picks.forEach(function(p) {
+        var key = p.lineNo + '|' + p.bin + '|' + p.item;
+        if (merged[key]) {
+            merged[key].qty += p.qty;
+        } else {
+            // Clone without mode — server never sees mode field
+            merged[key] = { id: p.id, lineNo: p.lineNo, item: p.item, bin: p.bin, qty: p.qty };
+        }
+    });
+    var result = [];
+    for (var k in merged) {
+        if (merged.hasOwnProperty(k)) result.push(merged[k]);
+    }
+    return result;
+}
+
+function submitFinal() {
+    if(isSubmitting || sessionPicks.length===0) return;
+    if(!navigator.onLine) { alert("OFFLINE. Connect to Wi-Fi."); return; }
+
+    // Merge for commit: combine Auto+Manual rows into single records per lineNo+bin+item
+    var commitPicks = mergePicksForCommit(sessionPicks);
+
+    if(!confirm(`CONFIRM SUBMISSION:\n\nAre you sure you want to commit ${commitPicks.length} pick lines?`)) return;
+    
+    isSubmitting = true;
+    const btn = document.getElementById('btnSubmit'); 
+    const originalText = btn.innerHTML; 
+    btn.innerHTML = "⏳ Sending..."; btn.disabled = true;
+    
+    let batchId = localStorage.getItem(`twg_batch_id_${SO_NUMBER}`);
+    if (!batchId) batchId = generateUUID();
+
+    fetch('/process_batch_scan', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ so:SO_NUMBER, picks:commitPicks, batch_id:batchId })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if(d.status === 'success') { 
+            playBeep('success'); 
+            alert(d.msg); 
+            clearLocal(); 
+            setTimeout(() => location.reload(), 1500); 
+        } else { 
+            alert("SERVER ERROR: "+d.msg); 
+            resetSubmitBtn(btn, originalText);
+        }
+    })
+    .catch(e => { 
+        alert("Network Failed: " + e.message); 
+        resetSubmitBtn(btn, originalText);
+    });
+}
+
+function resetSubmitBtn(btn, txt) { isSubmitting=false; btn.innerHTML=txt; btn.disabled=false; }
+
+function saveToLocal() {
+    if(!SO_NUMBER) return;
+    if (!localStorage.getItem(`twg_batch_id_${SO_NUMBER}`)) localStorage.setItem(`twg_batch_id_${SO_NUMBER}`, generateUUID());
+    localStorage.setItem(`twg_picks_${SO_NUMBER}`, JSON.stringify(sessionPicks));
+}
+
+function loadFromLocal() { 
+    const s = localStorage.getItem(`twg_picks_${SO_NUMBER}`); 
+    if(s) try { sessionPicks = JSON.parse(s); } catch(e){} 
+}
+
+function clearLocal() { 
+    localStorage.removeItem(`twg_picks_${SO_NUMBER}`); 
+    localStorage.removeItem(`twg_batch_id_${SO_NUMBER}`); 
+    sessionPicks = []; 
+    updateSessionDisplay(sessionPicks); 
+    saveToLocal(); 
+}
+
+function updateMode() {
+    unlockAudio();
+    const modeEl = document.querySelector('input[name="pickMode"]:checked');
+    if(!modeEl) return;
+    
+    isAutoMode = modeEl.value === 'auto';
+    const qtyInput = document.getElementById('qtyInput');
+    
+    if (isAutoMode) {
+        qtyInput.readOnly = true; qtyInput.value = 1; 
+        document.getElementById('btnMinus').classList.add('d-none'); 
+        document.getElementById('btnPlus').classList.add('d-none'); 
+        document.getElementById('addBtnContainer').classList.add('d-none');
+        if(currentBin && !document.getElementById('itemInput').disabled) setTimeout(() => safeFocus('itemInput'), 100);
+    } else {
+        qtyInput.readOnly = false; 
+        document.getElementById('btnMinus').classList.remove('d-none'); 
+        document.getElementById('btnPlus').classList.remove('d-none'); 
+        document.getElementById('addBtnContainer').classList.remove('d-none');
+    }
+}
+
+function openBinModal(){
+    if(document.activeElement) document.activeElement.blur();
+    if(!selectedItemCode) return;
+    openModal('binModal');
+    prefetchBins(selectedItemCode).then(() => { if(binCache[selectedItemCode]) renderBinList(binCache[selectedItemCode]); });
+}
+
+async function prefetchBins(item) {
+    if(binCache[item]) return;
+    const l = document.getElementById('binList'); l.innerHTML = '<div class="text-center" style="padding:20px;">Loading...</div>';
+    try { 
+        const r = await fetch('/get_item_bins', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({item}) }); 
+        const d = await r.json(); 
+        if(d.status === 'success') { binCache[item] = d.bins; renderBinList(d.bins); } else { l.innerText = d.msg; }
+    } catch(e) { l.innerText = 'Connection Failed'; }
+}
+
+function openReviewModal(){
+    renderReviewList(sessionPicks);
+    openModal('reviewModal');
+}
+
+function removePick(i){ 
+    if(confirm("Remove this entry?")){ 
+        sessionPicks.splice(i,1); 
+        openReviewModal(); updateSessionDisplay(sessionPicks); setTimeout(saveToLocal, 0); 
+    } 
+}
+
+function clearSession() {
+    if(confirm("Clear ALL scanned items?")) { 
+        sessionPicks = []; openReviewModal(); updateSessionDisplay(sessionPicks); setTimeout(saveToLocal, 0); 
+    }
+}
+
+function toggleKeyboard(id) { 
+    unlockAudio(); const el = document.getElementById(id); 
+    if(el.disabled) return;
+    if(el.inputMode==='none') { 
+        el.inputMode = (id === 'soInput') ? 'numeric' : 'text'; 
+        el.blur(); 
+        setTimeout(()=>el.focus(),50); 
+    } 
+    else { el.inputMode='none'; el.blur(); } 
+}
+
+function safeFocus(id) { 
+    const el = document.getElementById(id); 
+    if(el.disabled) return;
+    el.inputMode='none'; 
+    el.focus(); 
+    setTimeout(()=>el.inputMode='text',300); 
+}
+
+function adjustQty(n) { 
+    if(!isAutoMode) { 
+        const i=document.getElementById('qtyInput'); 
+        i.value=Math.max(0, (parseFloat(i.value)||0)+n); 
+    } 
+}
