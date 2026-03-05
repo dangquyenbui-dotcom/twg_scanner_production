@@ -6,10 +6,10 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="theme-color" content="#1a202c">
-    <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}?v={{ config.APP_VERSION }}">
     
     <title>TWG Dashboard</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v={{ config.APP_VERSION }}">
     
     <style>
         /* DASHBOARD SPECIFIC STYLES */
@@ -232,7 +232,7 @@
 <body>
 
     <div class="nav-bar">
-        <img src="{{ url_for('static', filename='logo/twg.png') }}" alt="TWG" class="brand-logo">
+        <img src="{{ url_for('static', filename='logo/twg.png') }}?v={{ config.APP_VERSION }}" alt="TWG" class="brand-logo">
         <div class="user-info">
             <span class="user-id">{{ session['user_id'] }}</span>
             <span class="user-loc">📍 {{ session['location'] }}</span>
@@ -280,11 +280,11 @@
             <a href="/logout" class="btn-footer-action">Sign Out</a>
             <button id="fs-toggle-btn" class="btn-footer-action btn-fs">⛶ Fullscreen</button>
         </div>
-        <div class="version-text">v1.7 • Connected</div>
+        <div class="version-text">v{{ config.APP_VERSION }} • Connected</div>
     </div>
 
     <!-- Fullscreen management is handled by utils.js -->
-    <script src="{{ url_for('static', filename='js/utils.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/utils.js') }}?v={{ config.APP_VERSION }}"></script>
 
     <script>
         // --- FULLSCREEN TOGGLE BUTTON ---
