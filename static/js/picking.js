@@ -10,7 +10,7 @@ let isAutoMode = true, isSubmitting = false;
 
 // --- INIT ---
 window.onload = function() {
-    log("App Core Loaded v1.7.1");  // DEBUG: version tag to confirm new JS loaded
+    log("App Core Loaded");
     if(SO_NUMBER) { 
         loadFromLocal(); 
         updateSessionDisplay(sessionPicks); 
@@ -44,11 +44,11 @@ function isVirtualKeyboardActive(el) {
  * from a scanned string. Returns the first stripped candidate found,
  * or the original string if no pattern matched.
  *
- * CASE 1 (original): Leading+trailing alpha wrapping a purely numeric core.
+ * CASE 1: Leading+trailing alpha wrapping a purely numeric core.
  *   Matches DataWedge symbology identifiers on UPC barcodes.
  *   'A729419150129A' → '729419150129'
  *
- * CASE 2 (new): Single Codabar start/stop character (A, B, C, or D) on
+ * CASE 2: Single Codabar start/stop character (A, B, C, or D) on
  *   each end wrapping an alphanumeric item code. These four letters are the
  *   standard Codabar start/stop symbols that scanners may prepend/append.
  *   'AA9101MBA' → 'A9101MB'
@@ -336,8 +336,7 @@ function resetInputAfterAdd(success) {
  *   C) Codabar-encoded item code — e.g. 'AA9101MBA' stripped to 'A9101MB'
  *      matches the item code after removing Codabar start/stop characters.
  *
- * DEBUG: Diagnostic logging is active. Tap 🐞 in status bar to view.
- * Remove DEBUG blocks once scan issue is fully resolved.
+ * The first matching candidate wins. If no candidate matches, it's an error.
  */
 function handleItemScan() {
     const rawScan = document.getElementById('itemInput').value.trim();
@@ -348,15 +347,6 @@ function handleItemScan() {
 
     // Get all plausible decoded values for this scan (raw + stripped variants)
     var candidates = getScanCandidates(rawScan);
-    
-    // ============================================================
-    // DEBUG: Log scan details — tap 🐞 bug icon to see
-    // ============================================================
-    log('SCAN raw=[' + rawScan + '] len=' + rawScan.length + ' candidates=[' + candidates.join('|') + '] expect=[' + selectedItemCode + '] upc=[' + (selectedUpc || '') + ']');
-    var charCodes = [];
-    for (var cc = 0; cc < rawScan.length; cc++) { charCodes.push(rawScan.charCodeAt(cc)); }
-    log('SCAN charCodes=[' + charCodes.join(',') + ']');
-    // ============================================================
 
     var isDirectMatch = false;
     var isUpcMatch = false;
@@ -381,17 +371,7 @@ function handleItemScan() {
     var match = isDirectMatch || isUpcMatch;
     
     if(!match) {
-        // ============================================================
-        // DEBUG: Show diagnostic toast on mismatch — REMOVE once resolved
-        // ============================================================
-        var debugMsg = 'MISMATCH raw=[' + rawScan + '] len=' + rawScan.length 
-            + ' tried=[' + candidates.join(', ') + ']'
-            + ' expect=[' + selectedItemCode + ']'
-            + ' upc=[' + (selectedUpc || 'none') + ']';
-        showToast(debugMsg, 'error');
-        log(debugMsg);
-        // ============================================================
-
+        showToast("Wrong Item/UPC!", 'error'); 
         document.getElementById('itemInput').value=''; 
         hideUpcBadge();
         if(isAutoMode) setTimeout(() => safeFocus('itemInput'), 50);

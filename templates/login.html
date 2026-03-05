@@ -203,21 +203,24 @@
         (function() {
             var loginInputFocused = false;
 
+            // Track when login inputs gain/lose focus
             var inputs = document.querySelectorAll('.login-card input');
             inputs.forEach(function(el) {
                 el.addEventListener('focus', function() { 
                     loginInputFocused = true; 
                 });
                 el.addEventListener('blur', function() { 
+                    // Small delay — blur fires before the next focus when tabbing between fields
                     setTimeout(function() { loginInputFocused = false; }, 200);
                 });
             });
 
+            // Override the global enterFullscreen for this page only
             var _originalEnterFullscreen = enterFullscreen;
 
             enterFullscreen = function() {
                 if (loginInputFocused) {
-                    return Promise.resolve();
+                    return Promise.resolve(); // Skip — keyboard needs to stay open
                 }
                 return _originalEnterFullscreen();
             };
